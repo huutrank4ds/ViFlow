@@ -49,6 +49,31 @@ class ViFlowOTCFM(nn.Module):
         self.final_norm = nn.LayerNorm(hidden_dim)
         self.velocity_head = nn.Linear(hidden_dim, n_mels)
 
+    def _init_weights(self, m):
+        """
+        Quy tắc khởi tạo chuẩn cho các loại layer
+        """
+        if isinstance(m, nn.Linear):
+            # Khởi tạo Linear theo phân phối chuẩn (Xavier/Glorot)
+            torch.nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        
+        elif isinstance(m, nn.Embedding):
+            # Embedding thường dùng phân phối chuẩn nhỏ
+            torch.nn.init.normal_(m.weight, mean=0.0, std=0.02)
+            
+        elif isinstance(m, (nn.LayerNorm, nn.GroupNorm)):
+            # Norm layer: weight=1, bias=0
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+            
+        elif isinstance(m, (nn.Conv1d, nn.Conv2d)):
+            # Kaiming cho các lớp Convolution (phù hợp với ReLU/SiLU)
+            nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+
     def create_mask_and_ids(self, lens_list: List[torch.Tensor], max_lens: List[int]):
         """
         Tạo Valid Mask và Dense Position IDs cho RoPE.
