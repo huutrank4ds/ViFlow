@@ -48,6 +48,7 @@ class ViFlowOTCFM(nn.Module):
         
         self.final_norm = nn.LayerNorm(hidden_dim)
         self.velocity_head = nn.Linear(hidden_dim, n_mels)
+        self.apply(self._init_weights)
 
     def _init_weights(self, m):
         """
