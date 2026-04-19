@@ -1,0 +1,44 @@
+model:
+  hidden_dim: 768
+  num_dit_blocks: 12
+  num_heads: 12
+  ffn_multiplier: 4
+  dropout: 0.0
+  max_text_tokens: 512
+  prompt_conv_channels: [128, 256, 512]
+  prompt_conv_kernel: 5
+
+data:
+  train_manifest: data/train_manifest.jsonl
+  valid_manifest: data/valid_manifest.jsonl
+  text_key: text
+  prompt_audio_key: prompt_audio_path
+  target_audio_key: target_audio_path
+  min_target_frames: 64
+  max_target_frames: 1024
+
+mel:
+  sample_rate: 24000
+  n_fft: 1024
+  hop_length: 256
+  win_length: 1024
+  n_mels: 100
+  fmin: 0
+  fmax: 12000.0
+  power: 1.0
+  mel_scale: "slaney"
+  norm: "slaney"
+  log_clip_min: 1.0e-5
+
+training:
+  batch_size: 8
+  num_workers: 4
+  learning_rate: 2.0e-4
+  weight_decay: 1.0e-2
+  grad_clip_norm: 1.0
+  max_steps: 300000
+  warmup_steps: 4000
+
+inference:
+  ode_steps: 32
+  temperature: 1.0
