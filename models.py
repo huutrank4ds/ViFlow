@@ -51,33 +51,38 @@ class ViFlowOTCFM(nn.Module):
 
     def create_mask_and_ids(self, lens_list: List[torch.Tensor], max_lens: List[int]):
         """
-        Tạo Mask và Position IDs chuẩn cho RoPE.
-        lens_list: [text_lens, prompt_lens, target_lens]
-        max_lens: [max_T_text, max_T_prompt, max_T_target]
+        Tạo Valid Mask và Dense Position IDs cho RoPE.
+        - lens_list: Danh sách các Tensor [B] chứa độ dài thực của từng phần (text, prompt, target).
+        - max_lens: Danh sách các số nguyên là độ dài lớn nhất của từng phần trong batch.
         """
         batch_size = lens_list[0].size(0)
         device = lens_list[0].device
         
         all_masks = []
         all_ids = []
-        curr_offset = 0
+        # Offset riêng cho từng sample trong batch (vì độ dài thực khác nhau)
+        curr_batch_offsets = torch.zeros(batch_size, device=device, dtype=torch.long)
         
         for l, m in zip(lens_list, max_lens):
-            # 1. Tạo Mask như cũ
-            mask = torch.arange(m, device=device)[None, :] < l[:, None]
-            all_masks.append(mask)
+            # 1. Tạo Valid Mask (True = nội dung thực) -> Shape: [B, m]
+            valid_mask = torch.arange(m, device=device)[None, :] < l[:, None]
             
-            # 2. Tạo Position IDs với Offset cố định
-            # Điều này đảm bảo: Token đầu tiên của Prompt LUÔN có ID là max_T_text
-            # bất kể câu đó có bao nhiêu padding.
-            ids = torch.arange(m, device=device)[None, :] + curr_offset
-            # Expand ra toàn batch: [B, m]
-            all_ids.append(ids.expand(batch_size, -1))
+            # 2. Tạo IDs nội bộ: dùng cumsum để padding không tăng ID
+            # Ví dụ: [T, T, P, P] -> mask [1, 1, 0, 0] -> cumsum [1, 2, 2, 2]
+            inner_ids = torch.cumsum(valid_mask.long(), dim=1)
             
-            curr_offset += m # Tăng offset cho phần tiếp theo
+            # 3. Cộng dồn với offset của các segment trước đó
+            segment_ids = inner_ids + curr_batch_offsets[:, None]
             
-        concat_mask = torch.cat(all_masks, dim=1)
-        concat_ids = torch.cat(all_ids, dim=1)
+            all_ids.append(segment_ids)
+            all_masks.append(valid_mask)
+            
+            # 4. Cập nhật offset dựa trên độ dài THỰC (l) để segment sau nối tiếp segment trước
+            curr_batch_offsets += l
+
+        # Ghép tất cả các phần lại theo chiều ngang (dim=1)
+        concat_mask = torch.cat(all_masks, dim=1) # [B, Total_T]
+        concat_ids = torch.cat(all_ids, dim=1)   # [B, Total_T]
         
         return concat_mask, concat_ids
 
@@ -120,7 +125,7 @@ class ViFlowOTCFM(nn.Module):
         # DiTBlock sẽ nhận x_all và dùng concat_mask để bỏ qua các vùng padding
         x = x_all
         for block in self.dit_blocks:
-            x = block(x, t_emb=t_emb, mask=concat_mask, position_ids=concat_ids)
+            x = block(x, t_emb=t_emb, attn_mask=~concat_mask[:, None, None, :], position_ids=concat_ids)
 
         x = self.final_norm(x)
 

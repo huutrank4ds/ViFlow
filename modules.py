@@ -123,25 +123,6 @@ class TargetProjector(nn.Module):
             x: [B, T_target, hidden_dim]
         """
         return self.proj(target)
-
-
-class SinusoidalPositionalEncoding(nn.Module):
-    """Classic sinusoidal positional encoding."""
-
-    def __init__(self, hidden_dim: int, max_len: int = 8192) -> None:
-        super().__init__()
-        position = torch.arange(max_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, hidden_dim, 2) * (-math.log(10000.0) / hidden_dim))
-        pe = torch.zeros(max_len, hidden_dim)
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        self.register_buffer("pe", pe.unsqueeze(0), persistent=False)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        seq_len = x.size(1)
-        pe: torch.Tensor = getattr(self, "pe")
-        x = x + pe[:, :seq_len]  # shape: [B, T, C]
-        return x
     
 
 class RotaryEmbedding(nn.Module):
