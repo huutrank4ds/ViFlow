@@ -4,7 +4,6 @@ model:
   num_heads: 12
   ffn_multiplier: 4
   dropout: 0.0
-  max_text_tokens: 512
   prompt_conv_channels: [128, 256, 512]
   prompt_conv_kernel: 5
 
@@ -36,8 +35,8 @@ training:
   learning_rate: 2.0e-4
   weight_decay: 1.0e-2
   grad_clip_norm: 1.0
-  max_steps: 300000
-  warmup_steps: 4000
+  num_epochs: 100
+  save_interval: 5
 
 inference:
   ode_steps: 32

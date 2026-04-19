@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Sequence
+from typing import List, Sequence
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-from frontend import MelSpectrogramFrontend, VietnameseTokenizer
 from modules import (
     DiTBlock,
     PromptAudioEncoder,
@@ -30,13 +28,15 @@ class ViFlowOTCFM(nn.Module):
         ffn_multiplier: int = 4,
         dropout: float = 0.1,
         n_mels: int = 100, # Khớp với BigVGAN v2 24kHz
+        prompt_conv_channels: Sequence[int] = (64, 128, 256), 
+        prompt_conv_kernel: int = 3,
         vocab_size: int = 135, # Vocab Hữu đã tối ưu
     ) -> None:
         super().__init__()
         
         # 1. Embeddings & Projectors
         self.text_embedding = TextEmbedding(vocab_size, hidden_dim)
-        self.prompt_encoder = PromptAudioEncoder(n_mels, hidden_dim) # Conv-based
+        self.prompt_encoder = PromptAudioEncoder(n_mels, hidden_dim, prompt_conv_channels, prompt_conv_kernel) # Conv-based
         self.target_projector = TargetProjector(n_mels, hidden_dim)
         self.timestep_embedding = TimestepEmbedding(hidden_dim)
 
