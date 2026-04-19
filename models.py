@@ -52,25 +52,25 @@ class ViFlowOTCFM(nn.Module):
 
     def _init_weights(self, m):
         """
-        Quy tắc khởi tạo chuẩn cho các loại layer
+        Phiên bản sửa lỗi: Kiểm tra None trước khi khởi tạo
         """
         if isinstance(m, nn.Linear):
-            # Khởi tạo Linear theo phân phối chuẩn (Xavier/Glorot)
             torch.nn.init.xavier_uniform_(m.weight)
+            # Kiểm tra bias trước khi điền giá trị 0
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
         
         elif isinstance(m, nn.Embedding):
-            # Embedding thường dùng phân phối chuẩn nhỏ
             torch.nn.init.normal_(m.weight, mean=0.0, std=0.02)
             
         elif isinstance(m, (nn.LayerNorm, nn.GroupNorm)):
-            # Norm layer: weight=1, bias=0
-            nn.init.constant_(m.bias, 0)
-            nn.init.constant_(m.weight, 1.0)
-            
+            # Kiểm tra bias vì LayerNorm có thể được định nghĩa với elementwise_affine=False
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+            if m.weight is not None:
+                nn.init.constant_(m.weight, 1.0)
+                
         elif isinstance(m, (nn.Conv1d, nn.Conv2d)):
-            # Kaiming cho các lớp Convolution (phù hợp với ReLU/SiLU)
             nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
