@@ -1,43 +1,60 @@
 model:
-  hidden_dim: 768
-  num_dit_blocks: 12
-  num_heads: 12
-  ffn_multiplier: 4
-  dropout: 0.0
-  prompt_conv_channels: [128, 256, 512]
-  prompt_conv_kernel: 5
+    hidden_dim: 1024
+    num_dit_blocks: 22
+    head_dim: 64
+    num_heads: 16
+    text_dim: 512
+    ff_mult: 4
+    dropout: 0.0
+    mel_dim: 100
+    vocab_size: 71
+    text_embedding_type: "convnext"
+    text_conformer_layers: 1
+    text_conformer_heads: 4
+    text_convnext_layers: 4
+    pe_attn_head:
+    text_mask_padding: True
+    vocab_path: "/kaggle/input/datasets/huutrank4ds/viflow-vocab/vocab.txt"
 
 data:
-  train_manifest: data/train_manifest.jsonl
-  valid_manifest: data/valid_manifest.jsonl
-  text_key: text
-  prompt_audio_key: prompt_audio_path
-  target_audio_key: target_audio_path
-  min_target_frames: 64
-  max_target_frames: 1024
+    dataset_dirs:
+        - "/kaggle/input/datasets/huuvahan/melspecviflow"
+    val_sample_path: "/kaggle/input/datasets/huutrank4ds/validation-sample-viflow/mixed_speaker_samples.csv"
 
 mel:
-  sample_rate: 24000
-  n_fft: 1024
-  hop_length: 256
-  win_length: 1024
-  n_mels: 100
-  fmin: 0
-  fmax: 12000.0
-  power: 1.0
-  mel_scale: "slaney"
-  norm: "slaney"
-  log_clip_min: 1.0e-5
+    sample_rate: 24000
+    n_fft: 1024
+    hop_length: 256
+    win_length: 1024
+    n_mels: 100
+    fmin: 0
+    fmax: 12000.0
+    power: 1.0
+    mel_scale: "slaney"
+    norm: "slaney"
+    log_clip_min: 1.0e-5
 
-training:
-  batch_size: 8
-  num_workers: 4
-  learning_rate: 2.0e-4
-  weight_decay: 1.0e-2
-  grad_clip_norm: 1.0
-  num_epochs: 100
-  save_interval: 5
+train:
+    num_epoch_kaggle_version: 20
+    port: '12355'
+    val_batch_size: 32
+    max_frames: 70000
+    num_workers: 2
+    learning_rate: 1e-4
+    weight_decay: 1.0e-2
+    warmup_steps: 5000
+    total_steps: 150000
+    grad_clip_norm: 1.0
+    num_epochs: 150
+    grad_accum_steps: 1
+    grad_clip: 1
+    checkpoint_dir: "checkpoints"
+    log_dir: "logs"
+    resume_path: "/kaggle/input/models/huutrank4ds/viflow-full-gear/pytorch/default/9/viflow_epoch_104.pt"
+    use_amp: True
+    use_scheduler: True
+    p_drop_audio_cond: 0.15
+    p_drop_text: 0.15
 
 inference:
-  ode_steps: 32
-  temperature: 1.0
+    ode_steps: 32

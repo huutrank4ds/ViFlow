@@ -1,163 +1,155 @@
-"""Core architecture: Frontend branches + DiT backbone + OT-CFM training logic."""
-
-from __future__ import annotations
-
 from typing import List, Sequence
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from modules import (
+from dit_layers import (
     DiTBlock,
-    PromptAudioEncoder,
-    TargetProjector,
-    TextEmbedding,
-    TimestepEmbedding,
+    ConvPositionEmbedding,
+    RotaryEmbedding,
+    AdaLayerNorm_Final
 )
+
+from text_embedding import TextEmbedding
+from timestep_embedding import TimestepEmbedding
+
+class InputEmbedding(nn.Module):
+    def __init__(self, mel_dim, text_dim, out_dim):
+        super().__init__()
+        self.proj = nn.Linear(mel_dim * 2 + text_dim, out_dim)
+        self.conv_pos_embed = ConvPositionEmbedding(dim=out_dim)
+
+    def forward(self, x, cond, text_embed, drop_audio_cond=False, mel_mask=None):
+        if drop_audio_cond:
+            cond = torch.zeros_like(cond)
+        
+        combined = torch.cat((x, cond, text_embed), dim=-1) # [B, N, D*3]
+        
+        x = self.proj(combined) # [B, N, out_dim]
+        x = self.conv_pos_embed(x, mask=mel_mask) + x
+        return x
 
 
 class ViFlowOTCFM(nn.Module):
-    """
-    Core Architecture: Chuyên biệt xử lý Flow Matching trên dữ liệu đã được chuẩn hóa.
-    """
     def __init__(
         self,
-        hidden_dim: int = 768,
-        num_dit_blocks: int = 12,
-        num_heads: int = 12,
-        ffn_multiplier: int = 4,
-        dropout: float = 0.1,
-        n_mels: int = 100, # Khớp với BigVGAN v2 24kHz
-        prompt_conv_channels: Sequence[int] = (64, 128, 256), 
-        prompt_conv_kernel: int = 3,
-        vocab_size: int = 135, # Vocab Hữu đã tối ưu
-    ) -> None:
+        dim=768,
+        depth=18,
+        head_dim=64,
+        heads=12,
+        text_dim=None,
+        text_mask_padding=True,
+        mel_dim=100,
+        vocab_size=71,
+        ff_mult=4,
+        text_embedding_type="convnext",
+        text_conformer_layers=1,
+        text_conformer_heads=4,
+        text_convnext_layers=4,
+        pe_attn_head=None,
+        dropout=0.0
+    ):
         super().__init__()
+        self.dim = dim
+        if text_dim is None:
+            text_dim = mel_dim
         
-        # 1. Embeddings & Projectors
-        self.text_embedding = TextEmbedding(vocab_size, hidden_dim)
-        self.prompt_encoder = PromptAudioEncoder(n_mels, hidden_dim, prompt_conv_channels, prompt_conv_kernel) # Conv-based
-        self.target_projector = TargetProjector(n_mels, hidden_dim)
-        self.timestep_embedding = TimestepEmbedding(hidden_dim)
-
-        # 2. Backbone DiT
-        self.dit_blocks = nn.ModuleList([
-            DiTBlock(hidden_dim, num_heads, ffn_multiplier, dropout)
-            for _ in range(num_dit_blocks)
+        # 1. Mã hóa văn bản (Text Encoder nội bộ)
+        # Text dim chốt cứng 100 để khớp với InputEmbedding của sếp
+        self.text_encoder = TextEmbedding(
+            vocab_size=vocab_size, 
+            text_dim=text_dim,
+            extra_type=text_embedding_type,
+            conformer_layers=text_conformer_layers,
+            conformer_heads=text_conformer_heads,
+            convnext_layers=text_convnext_layers,
+            mask_padding=text_mask_padding
+        )
+        
+        # 2. Điều kiện thời gian (Flow Matching Timestep)
+        self.time_embed = TimestepEmbedding(hidden_dim=dim)
+        
+        # 3. Lớp hòa trộn đầu vào (Combined: Noisy Mel + Ref Mel + Text)
+        self.input_embed = InputEmbedding(
+            mel_dim=mel_dim, 
+            text_dim=text_dim, 
+            out_dim=dim
+        )
+        
+        # 4. Rotary Positional Embedding (RoPE) - Khởi tạo 1 lần dùng chung
+        self.rope = RotaryEmbedding(head_dim)
+        
+        # 5. Danh sách các DiT Blocks (Trái tim của mô hình)
+        self.transformer_blocks = nn.ModuleList([
+            DiTBlock(
+                dim=dim, 
+                head_dim=head_dim,
+                heads=heads, 
+                ff_mult=ff_mult,
+                dropout=dropout,
+                pe_attn_head=pe_attn_head
+            ) for _ in range(depth)
         ])
         
-        self.final_norm = nn.LayerNorm(hidden_dim)
-        self.velocity_head = nn.Linear(hidden_dim, n_mels)
-        self.apply(self._init_weights)
+        # 6. Lớp chuẩn hóa cuối cùng (Adaptive) và Projection
+        self.final_norm = AdaLayerNorm_Final(dim)
+        self.final_proj = nn.Linear(dim, mel_dim)
+        self.initialize_weights()
 
-    def _init_weights(self, m):
+    def initialize_weights(self):
+        for block in self.transformer_blocks:
+            # attn_norm.linear là lớp sinh ra 6 tham số điều kiện
+            nn.init.constant_(block.attn_norm.linear.weight, 0)
+            nn.init.constant_(block.attn_norm.linear.bias, 0)
+
+        # 2. Khởi tạo cho AdaLayerNorm_Final (norm_out)
+        nn.init.constant_(self.final_norm.linear.weight, 0)
+        nn.init.constant_(self.final_norm.linear.bias, 0)
+
+        # 3. Khởi tạo cho Lớp Projection cuối cùng (proj_out)
+        nn.init.constant_(self.final_proj.weight, 0)
+        nn.init.constant_(self.final_proj.bias, 0)
+
+
+    def forward(self, x, cond, text_ids, t, mel_lens=None, mask=None, drop_audio_cond=False, drop_text=False, drop_audio_mask=None, drop_text_mask=None):
         """
-        Phiên bản sửa lỗi: Kiểm tra None trước khi khởi tạo
+        x: Noisy Mel [B, T, 100]
+        cond: Reference Mel [B, T, 100]
+        text_ids: Token IDs [B, T]
+        t: Timestep [B] (từ 0 đến 1)
+        mask: Padding Mask [B, T]
         """
-        if isinstance(m, nn.Linear):
-            torch.nn.init.xavier_uniform_(m.weight)
-            # Kiểm tra bias trước khi điền giá trị 0
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        
-        elif isinstance(m, nn.Embedding):
-            torch.nn.init.normal_(m.weight, mean=0.0, std=0.02)
+        if mel_lens is None:
+            seq_len = x.shape[1]
+        else:
+            seq_len = mel_lens
+        # Mã hóa văn bản
+        text_embed = self.text_encoder(text_ids, seq_len, drop_text) # [b, t, d]
+        # Tạo vector thời gian
+        t_emb = self.time_embed(t) # [B, dim]
+
+        if drop_text_mask is not None and drop_text_mask.any():
+            text_embed[drop_text_mask] = 0.0
             
-        elif isinstance(m, (nn.LayerNorm, nn.GroupNorm)):
-            # Kiểm tra bias vì LayerNorm có thể được định nghĩa với elementwise_affine=False
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-            if m.weight is not None:
-                nn.init.constant_(m.weight, 1.0)
-                
-        elif isinstance(m, (nn.Conv1d, nn.Conv2d)):
-            nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
+        if drop_audio_mask is not None and drop_audio_mask.any():
+            cond[drop_audio_mask] = 0.0
 
-    def create_mask_and_ids(self, lens_list: List[torch.Tensor], max_lens: List[int]):
-        """
-        Tạo Valid Mask và Dense Position IDs cho RoPE.
-        - lens_list: Danh sách các Tensor [B] chứa độ dài thực của từng phần (text, prompt, target).
-        - max_lens: Danh sách các số nguyên là độ dài lớn nhất của từng phần trong batch.
-        """
-        batch_size = lens_list[0].size(0)
-        device = lens_list[0].device
+        # Kết hợp (Noisy, Ref, Text) -> ConvPosEmbed -> Proj
+        x = self.input_embed(x, cond, text_embed, drop_audio_cond=drop_audio_cond, mel_mask=mask) # [B, T, dim]
         
-        all_masks = []
-        all_ids = []
-        # Offset riêng cho từng sample trong batch (vì độ dài thực khác nhau)
-        curr_batch_offsets = torch.zeros(batch_size, device=device, dtype=torch.long)
-        
-        for l, m in zip(lens_list, max_lens):
-            # 1. Tạo Valid Mask (True = nội dung thực) -> Shape: [B, m]
-            valid_mask = torch.arange(m, device=device)[None, :] < l[:, None]
+        # --- TRANSFORMER BLOCKS ---
+        for block in self.transformer_blocks:
+            # Truyền x, t_emb, mask và rope vào từng block
+            x = block(x, t_emb, mask=mask, rope=self.rope)
             
-            # 2. Tạo IDs nội bộ: dùng cumsum để padding không tăng ID
-            # Ví dụ: [T, T, P, P] -> mask [1, 1, 0, 0] -> cumsum [1, 2, 2, 2]
-            inner_ids = torch.cumsum(valid_mask.long(), dim=1)
+        # Adaptive LayerNorm cuối cùng dựa trên t_emb
+        x = self.final_norm(x, t_emb)
+        
+        # Dự đoán v_t (Trường vận tốc)
+        v_t = self.final_proj(x) # [B, T, 100]
+        
+        # Tẩy sạch vùng padding ở đầu ra cuối cùng
+        if mask is not None:
+            v_t = v_t.masked_fill(~mask.unsqueeze(-1), 0.0)
             
-            # 3. Cộng dồn với offset của các segment trước đó
-            segment_ids = inner_ids + curr_batch_offsets[:, None]
-            
-            all_ids.append(segment_ids)
-            all_masks.append(valid_mask)
-            
-            # 4. Cập nhật offset dựa trên độ dài THỰC (l) để segment sau nối tiếp segment trước
-            curr_batch_offsets += l
-
-        # Ghép tất cả các phần lại theo chiều ngang (dim=1)
-        concat_mask = torch.cat(all_masks, dim=1) # [B, Total_T]
-        concat_ids = torch.cat(all_ids, dim=1)   # [B, Total_T]
-        
-        return concat_mask, concat_ids
-
-    def forward(
-        self,
-        text_ids: torch.Tensor,     # [B, L_text]
-        text_lens: torch.Tensor,    # [B]
-        prompt_mel: torch.Tensor,   # [B, L_prompt, n_mels]
-        prompt_lens: torch.Tensor,  # [B]
-        target_xt: torch.Tensor,    # [B, L_target, n_mels] (Ma trận x_t trong OT-CFM)
-        target_lens: torch.Tensor,  # [B]
-        t: torch.Tensor,            # [B] Thời điểm t từ 0 -> 1
-    ) -> torch.Tensor:
-        
-        # 1. Chuyển đổi các nhánh về cùng hidden_dim
-        # Nhánh Text
-        x_text = self.text_embedding(text_ids) 
-        
-        # Nhánh Prompt (Conditioning)
-        x_prompt = self.prompt_encoder(prompt_mel) 
-        
-        # Nhánh Target (Dữ liệu đang khớp - Flow)
-        x_target = self.target_projector(target_xt)
-
-        # 2. Ghép chuỗi (Concatenation)
-        # Sequence format: [Text | Prompt | Target]
-        x_all = torch.cat([x_text, x_prompt, x_target], dim=1)
-        
-        # 3. Xử lý Masking hợp nhất
-        # Transformer trong DiT cần biết đâu là padding của cả 3 phần
-        concat_mask, concat_ids = self.create_mask_and_ids(
-            [text_lens, prompt_lens, target_lens],
-            [x_text.size(1), x_prompt.size(1), x_target.size(1)]
-        ) # Shape: [B, T_all]
-
-        # 4. Timestep Embedding (Khuếch tán/Flow thời gian)
-        t_emb = self.timestep_embedding(t) # [B, C]
-
-        # 5. DiT Backbone processing
-        # DiTBlock sẽ nhận x_all và dùng concat_mask để bỏ qua các vùng padding
-        x = x_all
-        for block in self.dit_blocks:
-            x = block(x, t_emb=t_emb, attn_mask=~concat_mask[:, None, None, :], position_ids=concat_ids)
-
-        x = self.final_norm(x)
-
-        # 6. Velocity Prediction (Chỉ lấy phần hidden state của Target)
-        # Chúng ta chỉ quan tâm đến vector field v_t tại vị trí của Target Mel
-        target_start = x_text.size(1) + x_prompt.size(1)
-        v_hat = self.velocity_head(x[:, target_start:, :]) # [B, L_target, n_mels]
-
-        return v_hat
+        return v_t
