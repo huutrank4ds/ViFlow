@@ -204,7 +204,7 @@ class ViFlowCollate:
         mel_lens = torch.tensor([item['mel_len'] for item in batch], dtype=torch.long)
         
         # Padding
-        phn_padded = pad_sequence(phoneme_tokens, batch_first=True, padding_value=self.tokenizer.get_pad_id)
+        phn_padded = pad_sequence(phoneme_tokens, batch_first=True, padding_value=self.tokenizer.pad_id)
         mels_padded = pad_sequence(mels, batch_first=True, padding_value=self.mel_pad_value)
         
         # mel_mask: 1 (True) là DỮ LIỆU THỰC, 0 (False) là PADDING

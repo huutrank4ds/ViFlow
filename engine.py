@@ -8,7 +8,7 @@ class ViFlowEngine:
         self.sigma_min = sigma_min
 
     # Tạo batch cho training với logic Infilling + Flow Matching
-    def get_train_batch(self, x1, mel_lens, mel_mask, min_p=0.5, max_p=0.7):
+    def get_train_batch(self, x1, mel_lens, mel_mask, min_p=0.3, max_p=0.7):
         """
         x1: [B, N, 100] - Mel nguyên bản
         mel_lens: [B] - Độ dài thực tế
@@ -17,7 +17,7 @@ class ViFlowEngine:
         batch_size, max_seq_len, dim = x1.size()
         device = x1.device
     
-        # Tính toán độ dài đoạn cần che (50% - 70%)
+        # Tính toán độ dài đoạn cần che (30% - 70%)
         m_ratio = torch.rand(batch_size, device=device) * (max_p - min_p) + min_p
         m_len = (m_ratio * mel_lens).long()
         
@@ -76,51 +76,80 @@ class ViFlowEngine:
     
     # Hàm giải ODE với lịch trình thời gian Sway và CFG
     @torch.no_grad()
-    def solve_ode(self, model, x0, steps, cond, text_ids, mel_mask, target_mask, sway_coef=-1.0, cfg_scale=1.5):
+    def solve_ode(self, model, x0, steps, cond, text_ids, mel_mask, target_mask, sway_coef=-1.0, cfg_scale=1.5, solver="euler"):
         xt = x0
         device = x0.device
+        batch_size = x0.size(0)
         
         # Lịch trình Sway
         rho = torch.linspace(0, 1, steps + 1, device=device)
         t_schedule = rho + (sway_coef * torch.sin(2 * np.pi * rho) / (2 * np.pi))
 
+        # =========================================================
+        # 🛠️ HÀM TRỢ GIÚP (HELPER): Đóng gói logic CFG để tái sử dụng
+        # =========================================================
+        def get_velocity(x_val, t_val):
+            # Tạo tensor thời gian
+            t_tensor = torch.full((batch_size,), t_val.item(), device=device)
+            
+            if cfg_scale > 1.0:
+                # 1. Luồng có điều kiện đầy đủ
+                v_cond = model(x=x_val, cond=cond, text_ids=text_ids, t=t_tensor, mask=mel_mask, drop_audio_cond=False)
+                
+                # 2. Luồng rỗng (Unconditional)
+                v_uncond = model(
+                    x=x_val, 
+                    cond=cond, 
+                    text_ids=text_ids, 
+                    t=t_tensor, 
+                    mask=mel_mask, 
+                    drop_audio_cond=True, 
+                    drop_text=True
+                )
+                # Phép ngoại suy CFG
+                return v_uncond + cfg_scale * (v_cond - v_uncond)
+            else:
+                # Chạy luồng thường nếu không dùng CFG
+                return model(x=x_val, cond=cond, text_ids=text_ids, t=t_tensor, mask=mel_mask)
+
+        # =========================================================
+        # 🚀 VÒNG LẶP GIẢI PHƯƠNG TRÌNH VI PHÂN (ODE LOOP)
+        # =========================================================
         for i in range(steps):
             t_curr = t_schedule[i]
             t_next = t_schedule[i+1]
             dt = t_next - t_curr
-            t_tensor = torch.full((x0.size(0),), t_curr.item(), device=device)
             
-            if cfg_scale > 1.0:
-                # 1. Luồng có điều kiện đầy đủ
-                v_cond = model(x=xt, cond=cond, text_ids=text_ids, t=t_tensor, mask=mel_mask, drop_audio_cond=False)
+            # 1. Lấy vận tốc v1 tại điểm hiện tại (Euler / Heun Predictor)
+            v1 = get_velocity(xt, t_curr)
+            
+            # Kiểm tra chế độ Heun (bỏ qua bước Heun ở vòng lặp cuối cùng)
+            if solver == "heun" and i < steps - 1:
+                # 2. Bước nhảy nháp (Draft Step)
+                x_draft = xt + v1 * dt
                 
-                # 2. Luồng không điều kiện (Null condition)
-                # Ta drop audio bằng flag và drop text bằng cách đưa về 0
-                v_uncond = model(
-                    x=xt, 
-                    cond=cond,
-                    text_ids=text_ids, 
-                    t=t_tensor, 
-                    mask=mel_mask, 
-                    drop_audio_cond=True,
-                    drop_text=True,
-                )
+                # 3. Lấy vận tốc v2 tại điểm nháp (Heun Corrector)
+                v2 = get_velocity(x_draft, t_next)
                 
-                vt = v_uncond + cfg_scale * (v_cond - v_uncond)
+                # 4. Hiệu chỉnh: Lấy trung bình cộng vận tốc
+                v_balanced = 0.5 * (v1 + v2)
+                
+                # 5. Bước nhảy thật
+                xt = xt + v_balanced * dt
             else:
-                vt = model(x=xt, cond=cond, text_ids=text_ids, t=t_tensor, mask=mel_mask)
+                # Bước nhảy Euler truyền thống
+                # (Dùng luôn cho thuật toán Euler hoặc là bước chốt sổ cuối cùng của Heun)
+                xt = xt + v1 * dt
                 
-            xt = xt + vt * dt
-            
-        # --- BƯỚC CUỐI: STITCHING (Hòa trộn kết quả) ---
-        # target_mask: True ở vùng Infilling (cần sinh), False ở vùng Reference (giữ nguyên)
+        # =========================================================
+        # 🧩 BƯỚC CUỐI: STITCHING (Hòa trộn kết quả)
+        # =========================================================
         m_exp = target_mask.unsqueeze(-1).float()
-
-        # Kết hợp: Lấy xt tại vùng được sinh và cond tại vùng tham chiếu ban đầu
-        # Công thức: x_final = (Kết quả ODE * mask) + (Reference * !mask)
+        
+        # x_final = (Kết quả ODE * mask) + (Reference * !mask)
         x_final = xt * m_exp + cond * (1.0 - m_exp)
 
-        # Dọn dẹp vùng padding (nếu có) để đảm bảo đầu ra sạch 100%
+        # Dọn dẹp vùng padding
         if mel_mask is not None:
             x_final = x_final.masked_fill(~mel_mask.unsqueeze(-1), 0.0)
 
