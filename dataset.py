@@ -167,12 +167,14 @@ class ViFlowH5Dataset(Dataset):
                 mel = group['mel'][()]
                 phonemes = group.attrs.get('phonemes', "")
                 speaker = group.attrs.get('speaker', "")
+                text = group.attrs.get('text', "")
                 mel_len = self.n_frames[idx]
 
             # 4. CHUYỂN ĐỔI SANG TENSOR
             return {
                 "mel": torch.from_numpy(mel).float(),
                 "phonemes": str(phonemes), # Ép kiểu string để tránh giữ tham chiếu H5
+                "text": str(text),
                 "speaker": str(speaker),
                 "mel_len": int(mel_len),
                 "id": str(sample_id)

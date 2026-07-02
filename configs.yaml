@@ -4,7 +4,7 @@ model:
     head_dim: 64
     num_heads: 16
     text_dim: 512
-    ff_mult: 4
+    ff_mult: 2
     dropout: 0.0
     mel_dim: 100
     vocab_size: 71
