@@ -5,3 +5,4 @@ librosa>=0.10.1
 soundfile>=0.12.1
 pyyaml>=6.0.1
 einops>=0.7.0
+sea-g2p

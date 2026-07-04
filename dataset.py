@@ -1,5 +1,7 @@
 import os
 import glob
+
+import re
 import h5py
 import torch
 import numpy as np
@@ -8,6 +10,50 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 from torch.nn.utils.rnn import pad_sequence
 import pickle
+from sea_g2p import SEAPipeline, Normalizer, G2P
+from librosa.filters import mel as librosa_mel_fn
+import torch.nn.functional as F
+
+class PhonemeProcessor:
+    def __init__(self):
+        print("🔊 Đang khởi tạo bộ chuyển đổi ngôn ngữ sea_g2p cho Tiếng Việt...")
+        self.pipeline = SEAPipeline(lang="vi") # <-- Bỏ comment dòng này khi chạy thật
+        self.normalizer = Normalizer(lang="vi")
+
+    def process(self, text: str, sample_id: str = "Unknown"):
+        if not text or not isinstance(text, str): 
+            return ""
+        try:
+            phonemes = self.pipeline.run(text) # <-- Bỏ comment dòng này khi chạy thật
+            
+            if isinstance(phonemes, list):
+                return " ".join([str(p) for p in phonemes])
+            return str(phonemes)
+        except Exception as e: 
+            print(f"⚠️ Lỗi G2P tại mẫu {sample_id}: {str(e)}")
+            return ""
+
+    def normalize(self, text: str):
+        """
+        Dùng lõi Normalizer của sea_g2p để chuẩn hóa văn bản.
+        """
+        if not text or not isinstance(text, str):
+            return ""
+        
+        try:
+            # Dùng trực tiếp hàm normalize của sea_g2p
+            # Nó sẽ xử lý cả ngày tháng, con số, tiền tệ, v.v. rất thông minh
+            norm_text = self.normalizer.normalize(text)
+            
+            # (Tùy chọn) sea_g2p đôi khi bọc từ tiếng Anh trong thẻ <en>...</en>
+            # Để tính WER sạch nhất, ta có thể dùng regex nhẹ để xóa các thẻ này đi
+            norm_text = re.sub(r'<[^>]+>', '', norm_text)
+            
+            return norm_text.strip()
+            
+        except Exception as e:
+            print(f"⚠️ Lỗi Normalizer: {str(e)}")
+            return text.lower().strip()
 
 class VietnamesePhonemeTokenizer:
     def __init__(self, vocab_path=None):
@@ -53,6 +99,36 @@ class VietnamesePhonemeTokenizer:
     def decode(self, ids):
         if isinstance(ids, torch.Tensor): ids = ids.tolist()
         return [self.id_to_symbol.get(i, self.unk_token) for i in ids if i != self.pad_id]
+
+class SpeechProcessor:
+    def __init__(self, mel_cfg, device="cuda"):
+        self.device = device
+        self.target_sr = mel_cfg['sample_rate']
+        self.hop_size = mel_cfg['hop_length']
+        self.win_size = mel_cfg['win_length']
+        self.n_fft = mel_cfg['n_fft']
+        self.n_mels = mel_cfg['n_mels']
+        
+        mel_basis = librosa_mel_fn(
+            sr=self.target_sr, n_fft=self.n_fft, n_mels=self.n_mels, 
+            fmin=mel_cfg.get('fmin', 0), fmax=mel_cfg.get('fmax', 12000)
+        )
+        self.mel_basis = torch.from_numpy(mel_basis).float().to(device)
+        self.window = torch.hann_window(self.win_size).to(device)
+
+    def compute_mel(self, wav):
+        x = wav.unsqueeze(0) 
+        pad_size = (self.n_fft - self.hop_size) // 2
+        x = F.pad(x.unsqueeze(1), (pad_size, pad_size), mode='reflect').squeeze(1)
+        spec = torch.stft(
+            x, self.n_fft, hop_length=self.hop_size, win_length=self.win_size, 
+            window=self.window, center=False, pad_mode='reflect', 
+            normalized=False, onesided=True, return_complex=True
+        )
+        spec = torch.sqrt(torch.view_as_real(spec).pow(2).sum(-1) + 1e-9)
+        mel = torch.matmul(self.mel_basis, spec)
+        log_mel = torch.log(torch.clamp(mel, min=1e-5))
+        return log_mel.squeeze(0).transpose(0, 1)
 
 def prepare_viflow_cache(config):
     """
