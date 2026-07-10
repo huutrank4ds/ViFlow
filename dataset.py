@@ -1,7 +1,8 @@
 import os
 import glob
-
 import re
+
+import librosa
 import h5py
 import torch
 import numpy as np
@@ -20,18 +21,20 @@ class PhonemeProcessor:
         self.pipeline = SEAPipeline(lang="vi") # <-- Bỏ comment dòng này khi chạy thật
         self.normalizer = Normalizer(lang="vi")
 
-    def process(self, text: str, sample_id: str = "Unknown"):
+    def process(self, text: str):
+        """"
+        Dùng pipeline của sea_g2p để chuyển văn bản thô sang phonemes.
+        """
         if not text or not isinstance(text, str): 
             return ""
         try:
-            phonemes = self.pipeline.run(text) # <-- Bỏ comment dòng này khi chạy thật
+            phonemes = self.pipeline.run(text) 
             
             if isinstance(phonemes, list):
                 return " ".join([str(p) for p in phonemes])
             return str(phonemes)
-        except Exception as e: 
-            print(f"⚠️ Lỗi G2P tại mẫu {sample_id}: {str(e)}")
-            return ""
+        except:
+            raise ValueError(f"Lỗi khi chuyển đổi sang phonemes: {text}")
 
     def normalize(self, text: str):
         """
@@ -52,7 +55,7 @@ class PhonemeProcessor:
             return norm_text.strip()
             
         except Exception as e:
-            print(f"⚠️ Lỗi Normalizer: {str(e)}")
+            print(f"Lỗi Normalizer: {str(e)}")
             return text.lower().strip()
 
 class VietnamesePhonemeTokenizer:
@@ -100,6 +103,9 @@ class VietnamesePhonemeTokenizer:
         if isinstance(ids, torch.Tensor): ids = ids.tolist()
         return [self.id_to_symbol.get(i, self.unk_token) for i in ids if i != self.pad_id]
 
+    def encode_batch(self, phoneme_seqs):
+        return [self.encode(seq) for seq in phoneme_seqs]
+
 class SpeechProcessor:
     def __init__(self, mel_cfg, device="cuda"):
         self.device = device
@@ -115,6 +121,21 @@ class SpeechProcessor:
         )
         self.mel_basis = torch.from_numpy(mel_basis).float().to(device)
         self.window = torch.hann_window(self.win_size).to(device)
+
+    def trim_silence(self, wav, top_db=30):
+        """
+        Cắt bỏ phần im lặng ở đầu và cuối của waveform.
+        """
+        if wav.shape[0] > 1:
+            wav = wav.mean(dim=0, keepdim=True)  # Chuyển sang mono nếu là stereo
+        if isinstance(wav, torch.Tensor):
+            wav_np = wav.cpu().numpy()
+        else:
+            wav_np = wav
+
+        wav_clean_np, _ = librosa.effects.trim(wav_np, top_db=top_db)
+        wav_clean = torch.from_numpy(wav_clean_np)
+        return wav_clean
 
     def compute_mel(self, wav):
         x = wav.unsqueeze(0) 
@@ -141,7 +162,7 @@ def prepare_viflow_cache(config):
     
     # Nếu đã có cache rồi thì bỏ qua không quét lại
     if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
-        print(f"✅ Cache đã tồn tại tại: {cache_path}. Bỏ qua bước quét H5.")
+        print(f"Cache đã tồn tại tại: {cache_path}. Bỏ qua bước quét H5.")
         return cache_path
 
     dataset_dirs = config['data']['dataset_dirs']
@@ -150,7 +171,7 @@ def prepare_viflow_cache(config):
     train_samples = []
     val_samples = []
 
-    print(f"🔍 Khởi tạo Metadata... Đang quét file H5 (chỉ thực hiện một lần)...")
+    print(f"Khởi tạo Metadata... Đang quét file H5...")
     
     # Logic lấy ID validation
     val_id_set = set()
@@ -181,7 +202,7 @@ def prepare_viflow_cache(config):
     with open(cache_path, 'wb') as f:
         pickle.dump((train_samples, val_samples), f)
         
-    print(f"💾 Đã tạo xong cache: {cache_path} (Train: {len(train_samples)}, Val: {len(val_samples)})")
+    print(f"Đã tạo xong cache: {cache_path} (Train: {len(train_samples)}, Val: {len(val_samples)})")
     return cache_path
 
 
@@ -193,7 +214,7 @@ def load_viflow_metadata(config):
     cache_path = os.path.join(config['train'].get('log_dir', 'logs'), "metadata_cache.pkl")
     
     if not os.path.exists(cache_path):
-        raise FileNotFoundError(f"❌ Không tìm thấy file cache tại {cache_path}. Hãy chạy prepare_viflow_cache trước.")
+        raise FileNotFoundError(f"Không tìm thấy file cache tại {cache_path}. Hãy chạy prepare_viflow_cache trước.")
         
     with open(cache_path, 'rb') as f:
         train_samples, val_samples = pickle.load(f)
@@ -298,3 +319,77 @@ class ViFlowCollate:
             "phn_lens": phn_lens,
             "ids": [item['id'] for item in batch]
         }
+    
+class ViFlowProcessor:
+    def __init__(self, mel_cfg, vocab_path=None, device="cuda", trim_db=30):
+        self.speech_processor = SpeechProcessor(mel_cfg, device=device)
+        self.phoneme_processor = PhonemeProcessor()
+        self.phoneme_tokenizer = VietnamesePhonemeTokenizer(vocab_path=vocab_path)
+        self.trim_db = trim_db
+        self.device = device
+
+    def process_text(self, text_ref, text_gen):
+        """
+        Chuẩn hóa văn bản và chuyển sang phonemes.
+        """
+        ref_phonemes = self.phoneme_processor.process(text_ref)
+        gen_phonemes = self.phoneme_processor.process(text_gen)
+        ref_len = len(ref_phonemes.split())
+        gen_len = len(gen_phonemes.split())
+        combined_phonemes = f"{ref_phonemes} {gen_phonemes}"
+        return combined_phonemes, (ref_len, gen_len)
+
+    def process_speech(self, wav):
+        """
+        Nhận vào waveform (Tensor 1D) và trả về mel spectrogram.
+        """
+        if self.trim_db > 0:
+            wav = self.speech_processor.trim_silence(wav, top_db=self.trim_db)
+        else:
+            if wav.shape[0] > 1:
+                wav = wav.mean(dim=0, keepdim=True)
+        wav = wav.to(self.device)
+        mel = self.speech_processor.compute_mel(wav)
+
+        return mel
+    
+    def prepare_input(self, wav, text_ref, text_gen, speed=1.0):
+        """
+        Chuẩn bị dữ liệu đầu vào cho mô hình.
+        """
+        mel = self.process_speech(wav)
+        combined_phonemes, (ref_len, gen_len) = self.process_text(text_ref, text_gen)
+        text_ids_raw = self.phoneme_tokenizer.encode(combined_phonemes)
+
+        ref_token_len = max(1, ref_len)
+        gen_token_len = max(1, gen_len)
+        n_prompt, mel_bins = mel.shape
+
+        gen_frames = int((n_prompt / ref_token_len) * (1 / speed) * gen_token_len)
+        total_frames = n_prompt + gen_frames
+
+        x0 = torch.randn((1, total_frames, mel_bins), device=self.device)
+        cond = torch.zeros((1, total_frames, mel_bins), device=self.device)
+        cond[0, :n_prompt, :] = mel[0]
+
+        target_mask = torch.zeros((1, total_frames), device=self.device)
+        target_mask[0, n_prompt:] = 1.0
+
+        if isinstance(text_ids_raw, torch.Tensor):
+            text_ids = text_ids_raw.clone().detach().to(dtype=torch.long, device=self.device).view(1, -1)
+        else:
+            text_ids = torch.tensor(text_ids_raw, dtype=torch.long, device=self.device).view(1, -1)
+
+        if text_ids.size(0) < total_frames:
+            text_ids = F.pad(text_ids, (0, total_frames - text_ids.size(1)), value=self.phoneme_tokenizer.pad_id)
+        elif text_ids.size(0) > total_frames:
+            text_ids = text_ids[:, :total_frames]
+
+        return {
+            "x0": x0,
+            "cond": cond,
+            "target_mask": target_mask,
+            "text_ids": text_ids,
+        }
+    
+    

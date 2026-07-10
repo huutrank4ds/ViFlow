@@ -1,99 +1,44 @@
-"""Inference utilities: Euler ODE integration for OT-CFM mel generation."""
-
-from __future__ import annotations
-
-from typing import Sequence
-
 import torch
-from torchdiffeq import odeint
+import yaml
+import json
+
+from huggingface_hub import hf_hub_download
+from bigvgan import BigVGAN, AttrDict
 
 from models import ViFlowOTCFM
+from trainer import load_checkpoint
 
 
-class EulerCFMSolver:
-    """Simple Euler solver for dx/dt = v_theta(x_t, t, c)."""
+with open("config.yaml", "r") as f:
+    config = yaml.safe_load(f)
 
-    def __init__(self, model: ViFlowOTCFM, n_steps: int = 32) -> None:
-        self.model = model
-        self.n_steps = n_steps
+BIGVGAN_REPO = 'nvidia/bigvgan_v2_24khz_100band_256x'
 
-    @torch.no_grad()
-    def sample(
-        self,
-        texts: Sequence[str],
-        prompt_wav: torch.Tensor,
-        target_frames: int,
-        temperature: float = 1.0,
-    ) -> torch.Tensor:
-        """Generate mel with Euler integration.
+def get_model(model_path, vocab_size,device):
+    viflow_model = ViFlowOTCFM(
+        dim=config['model']['hidden_dim'],
+        depth=config['model']['num_dit_blocks'],
+        head_dim=config['model']['head_dim'],
+        heads=config['model']['num_heads'],
+        text_dim=config['model']['text_dim'],
+        mel_dim=config['model']['mel_dim'],
+        vocab_size=vocab_size,
+        text_embedding_type='convnext',
+        text_conformer_layers=config['model']['text_conformer_layers'],
+        text_conformer_heads=config['model']['text_conformer_heads'],
+        text_convnext_layers=config['model']['text_convnext_layers'],
+        pe_attn_head=config['model']['pe_attn_head'],
+        dropout=config['model']['dropout']
+    ).to(device)
+    load_checkpoint(model_path, viflow_model, None, None, device)
+    return viflow_model.eval()
 
-        Args:
-            texts: list[str] length B.
-            prompt_wav: [B, T_prompt_wav]
-            target_frames: number of output mel frames.
+def get_bigvgan_vocoder(hf_token, device):
+    cfg_path = hf_hub_download(repo_id=BIGVGAN_REPO, filename="config.json", token=hf_token)
+    ckpt_path = hf_hub_download(repo_id=BIGVGAN_REPO, filename="bigvgan_generator.pt", token=hf_token)
 
-        Returns:
-            mel_hifigan: [B, 80, T_target]
-        """
-
-        device = next(self.model.parameters()).device
-        bsz = prompt_wav.size(0)
-        prompt_wav = prompt_wav.to(device)
-
-        x = torch.randn(bsz, target_frames, self.model.n_mels, device=device) * temperature
-        # shape: [B, T_target, 80]
-
-        dt = 1.0 / float(self.n_steps)
-        for i in range(self.n_steps):
-            t_val = float(i) / float(self.n_steps)
-            t = torch.full((bsz, 1), t_val, device=device)
-            v = self.model.predict_vector_field(
-                texts=texts,
-                prompt_wav=prompt_wav,
-                target_state=x,
-                t=t,
-                update_vocab=False,
-            )  # shape: [B, T_target, 80]
-            x = x + dt * v  # shape: [B, T_target, 80]
-
-        mel_hifigan = self.model.format_mel_for_hifigan(x)  # shape: [B, 80, T_target]
-        return mel_hifigan
-
-
-class ODEIntCFMSolver:
-    """Alternative torchdiffeq-based solver wrapper (default integrator: rk4)."""
-
-    def __init__(self, model: ViFlowOTCFM) -> None:
-        self.model = model
-
-    @torch.no_grad()
-    def sample(
-        self,
-        texts: Sequence[str],
-        prompt_wav: torch.Tensor,
-        target_frames: int,
-        n_eval_steps: int = 32,
-        method: str = "rk4",
-        temperature: float = 1.0,
-    ) -> torch.Tensor:
-        device = next(self.model.parameters()).device
-        bsz = prompt_wav.size(0)
-        prompt_wav = prompt_wav.to(device)
-
-        x0 = torch.randn(bsz, target_frames, self.model.n_mels, device=device) * temperature
-        t_span = torch.linspace(0.0, 1.0, n_eval_steps, device=device)
-
-        def func(t_scalar: torch.Tensor, x_state: torch.Tensor) -> torch.Tensor:
-            t = torch.full((bsz, 1), float(t_scalar.item()), device=device)
-            return self.model.predict_vector_field(
-                texts=texts,
-                prompt_wav=prompt_wav,
-                target_state=x_state,
-                t=t,
-                update_vocab=False,
-            )
-
-        traj = odeint(func, x0, t_span, method=method)
-        x_final = traj[-1]  # shape: [B, T_target, 80]
-        mel_hifigan = self.model.format_mel_for_hifigan(x_final)  # shape: [B, 80, T_target]
-        return mel_hifigan
+    with open(cfg_path, 'r') as f:
+        h = AttrDict(json.load(f))
+    vocoder = BigVGAN(h).to(device)
+    vocoder.load_state_dict(torch.load(ckpt_path, map_location=device)['generator'])
+    vocoder.eval().remove_weight_norm()

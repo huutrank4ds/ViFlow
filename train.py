@@ -6,6 +6,7 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+import argparse
 import csv
 from torch.optim.lr_scheduler import LambdaLR
 import math
@@ -206,11 +207,60 @@ def train_worker(rank, world_size, config, train_meta, val_meta):
         if dist.is_initialized(): dist.destroy_process_group()
 
 if __name__ == "__main__":
-    with open("configs.yaml", "r") as f:
-        config = yaml.safe_load(f)
+    # 1. KHỞI TẠO PARSER
+    parser = argparse.ArgumentParser(description="Huấn luyện mô hình ViFlowOTCFM")
     
+    # Argument cho file config gốc
+    parser.add_argument("--config", type=str, default="configs.yaml", help="Đường dẫn đến file configs.yaml")
+    
+    # Các arguments để override config
+    parser.add_argument("--use_scheduler", type=str, choices=['true', 'false', 'True', 'False'], default=None, help="Bật/Tắt scheduler (true/false)")
+    parser.add_argument("--max_frames", type=int, default=None, help="Số frame tối đa cho Dynamic Batching")
+    parser.add_argument("--warmup_steps", type=int, default=None, help="Số bước warmup cho Scheduler")
+    parser.add_argument("--total_steps", type=int, default=None, help="Tổng số bước huấn luyện")
+    parser.add_argument("--resume_path", type=str, default=None, help="Đường dẫn đến checkpoint cũ để train tiếp")
+    parser.add_argument("--vocab_path", type=str, default=None, help="Đường dẫn đến file vocab.txt")
+    args = parser.parse_args()
+
+    # 2. ĐỌC CONFIG TỪ YAML
+    with open(args.config, "r") as f:
+        config = yaml.safe_load(f)
+
+    # 3. OVERRIDE CÁC GIÁ TRỊ NẾU ĐƯỢC TRUYỀN VÀO TỪ LỆNH GỌI
+    if args.use_scheduler is not None:
+        config['train']['use_scheduler'] = args.use_scheduler.lower() == 'true'
+    
+    if args.max_frames is not None:
+        config['train']['max_frames'] = args.max_frames
+        
+    if args.warmup_steps is not None:
+        config['train']['warmup_steps'] = args.warmup_steps
+        
+    if args.total_steps is not None:
+        config['train']['total_steps'] = args.total_steps
+        
+    if args.resume_path is not None:
+        config['train']['resume_path'] = args.resume_path
+        
+    if args.vocab_path is not None:
+        config['model']['vocab_path'] = args.vocab_path
+
+    # In ra để kiểm tra xem config đã nhận đúng chưa (chỉ in ở tiến trình chính)
+    print("=== CONFIGURATION OVERRIDES ===")
+    print(f"Scheduler    : {config['train']['use_scheduler']}")
+    print(f"Max Frames   : {config['train'].get('max_frames')}")
+    print(f"Warmup Steps : {config['train'].get('warmup_steps')}")
+    print(f"Total Steps  : {config['train'].get('total_steps')}")
+    print(f"Resume Path  : {config['train'].get('resume_path')}")
+    print(f"Vocab Path   : {config['model'].get('vocab_path')}")
+    print("===============================\n")
+
+    # 4. CHẠY PIPELINE
     prepare_viflow_cache(config)
     train_meta, val_meta = load_viflow_metadata(config)
+    
     world_size = torch.cuda.device_count()
     if world_size > 0:
         mp.spawn(train_worker, args=(world_size, config, train_meta, val_meta), nprocs=world_size, join=True)
+    else:
+        print("Không tìm thấy GPU nào! Hãy kiểm tra lại CUDA.")

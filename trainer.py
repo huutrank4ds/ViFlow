@@ -10,6 +10,8 @@ import csv
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 import gc
 import glob
 
@@ -204,9 +206,6 @@ class ViFlowTrainer:
         del mels_gt, x_gen, x0, cond, target_mask
 
     def _plot_mel(self, real, fake, length, p_end, epoch, idx):
-        from matplotlib.figure import Figure
-        from matplotlib.backends.backend_agg import FigureCanvasAgg
-        
         real_np = real[:length].cpu().numpy().T
         fake_np = fake[:length].cpu().numpy().T
         
