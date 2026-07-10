@@ -1,5 +1,4 @@
 import torch
-import yaml
 import json
 
 from huggingface_hub import hf_hub_download
@@ -8,13 +7,9 @@ from bigvgan import BigVGAN, AttrDict
 from models import ViFlowOTCFM
 from trainer import load_checkpoint
 
-
-with open("config.yaml", "r") as f:
-    config = yaml.safe_load(f)
-
 BIGVGAN_REPO = 'nvidia/bigvgan_v2_24khz_100band_256x'
 
-def get_model(model_path, vocab_size,device):
+def get_model(model_path, vocab_size,device, config):
     viflow_model = ViFlowOTCFM(
         dim=config['model']['hidden_dim'],
         depth=config['model']['num_dit_blocks'],

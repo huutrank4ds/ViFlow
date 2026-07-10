@@ -328,6 +328,9 @@ class ViFlowProcessor:
         self.trim_db = trim_db
         self.device = device
 
+    def vocab_size(self):
+        return self.phoneme_tokenizer.vocab_size
+
     def process_text(self, text_ref, text_gen):
         """
         Chuẩn hóa văn bản và chuyển sang phonemes.
@@ -349,8 +352,8 @@ class ViFlowProcessor:
             if wav.shape[0] > 1:
                 wav = wav.mean(dim=0, keepdim=True)
         wav = wav.to(self.device)
-        mel = self.speech_processor.compute_mel(wav)
 
+        mel = self.speech_processor.compute_mel(wav)
         return mel
     
     def prepare_input(self, wav, text_ref, text_gen, speed=1.0):
