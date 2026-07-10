@@ -122,20 +122,6 @@ class SpeechProcessor:
         self.mel_basis = torch.from_numpy(mel_basis).float().to(device)
         self.window = torch.hann_window(self.win_size).to(device)
 
-    def trim_silence(self, wav, top_db=30):
-        """
-        Cắt bỏ phần im lặng ở đầu và cuối của waveform.
-        """
-        if wav.shape[0] > 1:
-            wav = wav.mean(dim=0, keepdim=True)  # Chuyển sang mono nếu là stereo
-        if isinstance(wav, torch.Tensor):
-            wav_np = wav.cpu().numpy()
-        else:
-            wav_np = wav
-
-        wav_clean_np, _ = librosa.effects.trim(wav_np, top_db=top_db)
-        wav_clean = torch.from_numpy(wav_clean_np)
-        return wav_clean
 
     def compute_mel(self, wav):
         x = wav.unsqueeze(0) 
@@ -324,7 +310,7 @@ class ViFlowProcessor:
     def __init__(self, mel_cfg, vocab_path=None, device="cuda", trim_db=30):
         self.speech_processor = SpeechProcessor(mel_cfg, device=device)
         self.phoneme_processor = PhonemeProcessor()
-        self.phoneme_tokenizer = VietnamesePhonemeTokenizer(vocab_path=vocab_path)
+        self.phoneme_tokenizer = VietnamesePhonemeTokenizer(vocab_path)
         self.trim_db = trim_db
         self.device = device
 
@@ -332,62 +318,45 @@ class ViFlowProcessor:
         return self.phoneme_tokenizer.vocab_size
 
     def process_text(self, text_ref, text_gen):
-        """
-        Chuẩn hóa văn bản và chuyển sang phonemes.
-        """
-        ref_phonemes = self.phoneme_processor.process(text_ref)
-        gen_phonemes = self.phoneme_processor.process(text_gen)
-        ref_len = len(ref_phonemes.split())
-        gen_len = len(gen_phonemes.split())
+        ref_phonemes = self.phoneme_processor.process(text_ref).strip()
+        gen_phonemes = self.phoneme_processor.process(text_gen).strip()
+        
+        # Sửa lại độ dài cho chuẩn số token thực tế
+        ref_len = max(1, len(self.phoneme_tokenizer.encode(ref_phonemes)))
+        gen_len = max(1, len(self.phoneme_tokenizer.encode(gen_phonemes)))
+        
         combined_phonemes = f"{ref_phonemes} {gen_phonemes}"
         return combined_phonemes, (ref_len, gen_len)
 
     def process_speech(self, wav):
-        """
-        Nhận vào waveform (Tensor 1D) và trả về mel spectrogram.
-        """
+        # Ép về mono
+        if wav.shape[0] > 1:
+            wav = wav.mean(dim=0, keepdim=True)
+        wav = wav.squeeze()
+        
+        # Đã vá lỗi hàm trim_silence bằng thư viện chuẩn librosa
         if self.trim_db > 0:
-            wav = self.speech_processor.trim_silence(wav, top_db=self.trim_db)
+            wav_np = wav.cpu().numpy()
+            wav_clean_np, _ = librosa.effects.trim(wav_np, top_db=self.trim_db)
+            wav = torch.from_numpy(wav_clean_np).to(self.device)
         else:
-            if wav.shape[0] > 1:
-                wav = wav.mean(dim=0, keepdim=True)
-        wav = wav.to(self.device)
+            wav = wav.to(self.device)
 
         mel = self.speech_processor.compute_mel(wav)
         return mel
     
     def prepare_input(self, wav, text_ref, text_gen, speed=1.0):
-        """
-        Chuẩn bị dữ liệu đầu vào cho mô hình, tận dụng tối đa các helper methods của class.
-        """
-        # ====================================================
-        # 1. KHAI THÁC HELPER METHODS
-        # ====================================================
-        # Tự động xử lý Mono, cắt khoảng lặng (Trim Silence) và chuyển sang Mel Spectrogram
         mel = self.process_speech(wav) 
+        combined_phonemes, (ref_token_len, gen_token_len) = self.process_text(text_ref, text_gen)
         
-        # Chuẩn hóa văn bản, gộp Phonemes và lấy độ dài
-        combined_phonemes, (ref_len, gen_len) = self.process_text(text_ref, text_gen)
-        
-        # ====================================================
-        # 2. TÍNH TOÁN KHUNG HÌNH (FRAMES)
-        # ====================================================
-        # Đảm bảo mel có shape [1, n_prompt, mel_bins] để tương thích tính toán
         if mel.dim() == 2:
             mel = mel.unsqueeze(0)
             
         n_prompt, mel_bins = mel.shape[1], mel.shape[2]
 
-        ref_token_len = max(1, ref_len)
-        gen_token_len = max(1, gen_len)
-        
-        # Tính số frame cần sinh dựa trên tốc độ và tỷ lệ token
         generate_frames = int((n_prompt / ref_token_len) * (1 / speed) * gen_token_len)
         total_frames = n_prompt + generate_frames
 
-        # ====================================================
-        # 3. TẠO TENSORS (x0, cond, mask, text_ids)
-        # ====================================================
         x0 = torch.randn((1, total_frames, mel_bins), device=self.device)
         
         cond = torch.zeros((1, total_frames, mel_bins), device=self.device)
@@ -396,7 +365,6 @@ class ViFlowProcessor:
         target_mask = torch.zeros((1, total_frames), device=self.device)
         target_mask[0, n_prompt:] = 1.0
         
-        # Lấy token ID từ tokenizer và chuyển sang Tensor
         text_ids_raw = self.phoneme_tokenizer.encode(combined_phonemes)
         
         if isinstance(text_ids_raw, torch.Tensor):
@@ -404,7 +372,6 @@ class ViFlowProcessor:
         else:
             text_ids = torch.tensor(text_ids_raw, dtype=torch.long, device=self.device).view(1, -1)
             
-        # Padding hoặc Cắt bớt chuỗi token cho khớp với total_frames
         current_seq_len = text_ids.size(1)
         if current_seq_len < total_frames:
             text_ids = F.pad(text_ids, (0, total_frames - current_seq_len), value=self.phoneme_tokenizer.pad_id)
