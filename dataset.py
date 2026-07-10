@@ -322,8 +322,8 @@ class ViFlowProcessor:
         gen_phonemes = self.phoneme_processor.process(text_gen).strip()
         
         # Sửa lại độ dài cho chuẩn số token thực tế
-        ref_len = max(1, len(self.phoneme_tokenizer.encode(ref_phonemes)))
-        gen_len = max(1, len(self.phoneme_tokenizer.encode(gen_phonemes)))
+        ref_len = max(1, len(ref_phonemes.split()))
+        gen_len = max(1, len(gen_phonemes.split()))
         
         combined_phonemes = f"{ref_phonemes} {gen_phonemes}"
         return combined_phonemes, (ref_len, gen_len)
@@ -346,17 +346,19 @@ class ViFlowProcessor:
         return mel
     
     def prepare_input(self, wav, text_ref, text_gen, speed=1.0):
+        # Chuyển đổi wav sang mel spectrogram
         mel = self.process_speech(wav) 
-        combined_phonemes, (ref_token_len, gen_token_len) = self.process_text(text_ref, text_gen)
-        
-        if mel.dim() == 2:
-            mel = mel.unsqueeze(0)
-            
-        n_prompt, mel_bins = mel.shape[1], mel.shape[2]
+        n_prompt, mel_bins = mel.shape
+        mel = mel.unsqueeze(0)
 
+        # Chuyển đổi văn bản sang phonemes và tính toán độ dài token
+        combined_phonemes, (ref_token_len, gen_token_len) = self.process_text(text_ref, text_gen)
+
+        # Tính toán số frame cần sinh ra dựa trên tốc độ và độ dài token
         generate_frames = int((n_prompt / ref_token_len) * (1 / speed) * gen_token_len)
         total_frames = n_prompt + generate_frames
-
+        
+        # Tạo các tensor đầu vào cho mô hình
         x0 = torch.randn((1, total_frames, mel_bins), device=self.device)
         
         cond = torch.zeros((1, total_frames, mel_bins), device=self.device)
@@ -383,6 +385,7 @@ class ViFlowProcessor:
             "cond": cond,
             "target_mask": target_mask,
             "text_ids": text_ids,
+            "n_prompt": n_prompt,
         }
     
     
