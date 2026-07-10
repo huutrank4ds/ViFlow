@@ -37,3 +37,4 @@ def get_bigvgan_vocoder(hf_token, device):
     vocoder = BigVGAN(h).to(device)
     vocoder.load_state_dict(torch.load(ckpt_path, map_location=device)['generator'])
     vocoder.eval().remove_weight_norm()
+    return vocoder
