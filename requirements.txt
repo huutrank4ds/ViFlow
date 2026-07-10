@@ -1,10 +1,35 @@
+# ==========================================
+# 1. Core Deep Learning & Math
+# ==========================================
 torch>=2.0.0
 torchaudio>=2.0.0
+numpy>=1.22.0
+scipy>=1.7.3
+
+# ==========================================
+# 2. Model Architectures & Flow Matching
+# ==========================================
 torchdiffeq>=0.2.4
+einops>=0.7.0
+
+# ==========================================
+# 3. Audio Processing & TTS Ecosystem
+# ==========================================
 librosa>=0.10.1
 soundfile>=0.12.1
-pyyaml>=6.0.1
-einops>=0.7.0
-sea-g2p
-bigvgan
+sea-g2p               # Thư viện G2P cho tiếng Việt
+bigvgan               # Vocoder
 huggingface_hub>=0.17.4
+
+# ==========================================
+# 4. Data Processing & Utilities
+# ==========================================
+h5py>=3.8.0           # BẮT BUỘC: Để đọc/ghi dataset HDF5
+tqdm>=4.65.0          # BẮT BUỘC: Thanh tiến trình (progress bar) bạn đang dùng ở các vòng lặp
+pyyaml>=6.0.1         # BẮT BUỘC: Để load file configs.yaml
+
+# ==========================================
+# 5. Optional / Development (Khuyên dùng)
+# ==========================================
+# tensorboard>=2.14.0   # Nếu sau này bạn muốn visualize loss thay vì chỉ ghi ra CSV
+# pandas>=2.0.0         # Môi trường Data Science thường cần để thao tác bảng biểu nhanh

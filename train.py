@@ -2,7 +2,7 @@ import os
 import yaml
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
+from torch.multiprocessing.spawn import spawn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -88,12 +88,12 @@ def train_worker(rank, world_size, config, train_meta, val_meta):
         resume_path = config['train']['resume_path']
         if resume_path and os.path.exists(resume_path):
             start_epoch, steps, ema_state, best_val_loss = load_checkpoint(
-                resume_path, model, optimizer, scheduler, device
+                resume_path, model, optimizer, scheduler, str(device)
             )
             start_epoch += 1
         else:
             start_epoch, steps, ema_state, best_val_loss = load_checkpoint(
-                resume_path, model, optimizer, scheduler, device
+                resume_path, model, optimizer, scheduler, str(device)
             )
         
         if is_distributed:
@@ -152,7 +152,7 @@ def train_worker(rank, world_size, config, train_meta, val_meta):
             
             total_epoch_loss_sum = 0.0
             total_epoch_elements = 0.0
-            join_context = model.join() if is_distributed else contextlib.nullcontext()
+            join_context = model.join() if isinstance(model, DDP) else contextlib.nullcontext()
 
             with join_context:
                 for batch in pbar:
@@ -220,6 +220,13 @@ if __name__ == "__main__":
     parser.add_argument("--total_steps", type=int, default=None, help="Tổng số bước huấn luyện")
     parser.add_argument("--resume_path", type=str, default=None, help="Đường dẫn đến checkpoint cũ để train tiếp")
     parser.add_argument("--vocab_path", type=str, default=None, help="Đường dẫn đến file vocab.txt")
+    parser.add_argument("--learning_rate", type=float, default=None, help="Tốc độ học tối đa")
+    parser.add_argument("--grad_accum_steps", type=int, default=None, help="Số bước tích lũy gradient trước khi cập nhật mô hình")
+    parser.add_argument("--grad_clip", type=float, default=None, help="Giá trị gradient clip")
+    parser.add_argument("--num_epochs", type=int, default=None, help="Số lượng epoch cho huấn luyện")
+    parser.add_argument("--p_drop_audio_cond", type=float, default=None, help="Xác suất bỏ qua điều kiện audio trong huấn luyện")
+    parser.add_argument("--p_drop_text", type=float, default=None, help="Xác suất bỏ qua điều kiện text trong huấn luyện")
+    parser.add_argument("--use_amp", type=str, choices=['true', 'false', 'True', 'False'], default=None, help="Bật/Tắt AMP (true/false)")
     args = parser.parse_args()
 
     # 2. ĐỌC CONFIG TỪ YAML
@@ -244,6 +251,27 @@ if __name__ == "__main__":
         
     if args.vocab_path is not None:
         config['model']['vocab_path'] = args.vocab_path
+    
+    if args.learning_rate is not None:
+        config['train']['learning_rate'] = args.learning_rate
+
+    if args.grad_accum_steps is not None:
+        config['train']['grad_accum_steps'] = args.grad_accum_steps
+
+    if args.grad_clip is not None:
+        config['train']['grad_clip'] = args.grad_clip
+
+    if args.num_epochs is not None:
+        config['train']['num_epochs'] = args.num_epochs
+    
+    if args.p_drop_audio_cond is not None:
+        config['train']['p_drop_audio_cond'] = args.p_drop_audio_cond
+
+    if args.p_drop_text is not None:
+        config['train']['p_drop_text'] = args.p_drop_text
+
+    if args.use_amp is not None:
+        config['train']['use_amp'] = args.use_amp.lower() == 'true'
 
     # In ra để kiểm tra xem config đã nhận đúng chưa (chỉ in ở tiến trình chính)
     print("=== CONFIGURATION OVERRIDES ===")
@@ -251,8 +279,15 @@ if __name__ == "__main__":
     print(f"Max Frames   : {config['train'].get('max_frames')}")
     print(f"Warmup Steps : {config['train'].get('warmup_steps')}")
     print(f"Total Steps  : {config['train'].get('total_steps')}")
+    print(f"Learning Rate: {config['train'].get('learning_rate')}")
     print(f"Resume Path  : {config['train'].get('resume_path')}")
     print(f"Vocab Path   : {config['model'].get('vocab_path')}")
+    print(f"Grad Accum   : {config['train'].get('grad_accum_steps')}")
+    print(f"Grad Clip    : {config['train'].get('grad_clip')}")
+    print(f"Num Epochs   : {config['train'].get('num_epochs')}")
+    print(f"P Drop Audio  : {config['train'].get('p_drop_audio_cond')}")
+    print(f"P Drop Text   : {config['train'].get('p_drop_text')}")
+    print(f"Use AMP      : {config['train'].get('use_amp')}")
     print("===============================\n")
 
     # 4. CHẠY PIPELINE
@@ -260,7 +295,8 @@ if __name__ == "__main__":
     train_meta, val_meta = load_viflow_metadata(config)
     
     world_size = torch.cuda.device_count()
+    
     if world_size > 0:
-        mp.spawn(train_worker, args=(world_size, config, train_meta, val_meta), nprocs=world_size, join=True)
+        spawn(train_worker, args=(world_size, config, train_meta, val_meta), nprocs=world_size, join=True)
     else:
         print("Không tìm thấy GPU nào! Hãy kiểm tra lại CUDA.")

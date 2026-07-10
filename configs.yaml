@@ -4,7 +4,7 @@ model:
     head_dim: 64
     num_heads: 16
     text_dim: 512
-    ff_mult: 2
+    ff_mult: 4
     dropout: 0.0
     mel_dim: 100
     vocab_size: 71
@@ -44,7 +44,6 @@ train:
     weight_decay: 1.0e-2
     warmup_steps: 5000
     total_steps: 150000
-    grad_clip_norm: 1.0
     num_epochs: 150
     grad_accum_steps: 1
     grad_clip: 1

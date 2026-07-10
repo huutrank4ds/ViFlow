@@ -2,14 +2,12 @@ import os
 import torch
 import torch.distributed as dist
 from torch.nn.utils import clip_grad_norm_
-from torch import amp
+from torch.amp.grad_scaler import GradScaler
+from torch.amp.autocast_mode import autocast
 import librosa.display
-import numpy as np
-from tqdm import tqdm
 import csv
 import matplotlib
 matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 import gc
@@ -56,7 +54,7 @@ class ViFlowTrainer:
         
         # Lấy grad_accum_steps từ file config
         self.grad_accum = config['train']["grad_accum_steps"]
-        self.scaler = amp.GradScaler('cuda', enabled=config["train"]["use_amp"])
+        self.scaler = GradScaler('cuda', enabled=config["train"]["use_amp"])
         
         self.ema = EMA(self.raw_model, beta=config['train'].get("ema_beta", 0.9999))
         if ema_state:
@@ -94,7 +92,7 @@ class ViFlowTrainer:
             drop_audio_mask = torch.rand(batch_size, device=self.device) < p_drop_audio_cond
             drop_text_mask = torch.rand(batch_size, device=self.device) < p_drop_text
                 
-            with amp.autocast("cuda", enabled=self.config["train"]["use_amp"]):
+            with autocast("cuda", enabled=self.config["train"]["use_amp"]):
                 vt = self.model(
                     x=xt, 
                     cond=cond, 
@@ -115,7 +113,7 @@ class ViFlowTrainer:
     
         if (self.step + 1) % self.grad_accum == 0:
             self.scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config['train']["grad_clip"])
+            clip_grad_norm_(self.model.parameters(), self.config['train']["grad_clip"])
             self.scaler.step(self.optimizer)
             self.scaler.update()
             self.optimizer.zero_grad()
@@ -154,7 +152,7 @@ class ViFlowTrainer:
                     collected_data[k].append(batch[k][:needed].cpu())
                 total_collected += batch[k][:needed].size(0)
 
-            with amp.autocast("cuda", enabled=self.config["train"]["use_amp"]):
+            with autocast("cuda", enabled=self.config["train"]["use_amp"]):
                 xt, cond, ut, t, target_mask = self.engine.get_train_batch(mels, mel_lens, mel_mask)
                 v_online = self.raw_model(x=xt, cond=cond, text_ids=phonemes, t=t, mel_lens=mel_lens, mask=mel_mask)
                 v_ema = self.ema.model(x=xt, cond=cond, text_ids=phonemes, t=t, mel_lens=mel_lens, mask=mel_mask)
