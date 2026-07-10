@@ -358,34 +358,57 @@ class ViFlowProcessor:
     
     def prepare_input(self, wav, text_ref, text_gen, speed=1.0):
         """
-        Chuẩn bị dữ liệu đầu vào cho mô hình.
+        Chuẩn bị dữ liệu đầu vào cho mô hình, tận dụng tối đa các helper methods của class.
         """
-        mel = self.process_speech(wav)
+        # ====================================================
+        # 1. KHAI THÁC HELPER METHODS
+        # ====================================================
+        # Tự động xử lý Mono, cắt khoảng lặng (Trim Silence) và chuyển sang Mel Spectrogram
+        mel = self.process_speech(wav) 
+        
+        # Chuẩn hóa văn bản, gộp Phonemes và lấy độ dài
         combined_phonemes, (ref_len, gen_len) = self.process_text(text_ref, text_gen)
-        text_ids_raw = self.phoneme_tokenizer.encode(combined_phonemes)
+        
+        # ====================================================
+        # 2. TÍNH TOÁN KHUNG HÌNH (FRAMES)
+        # ====================================================
+        # Đảm bảo mel có shape [1, n_prompt, mel_bins] để tương thích tính toán
+        if mel.dim() == 2:
+            mel = mel.unsqueeze(0)
+            
+        n_prompt, mel_bins = mel.shape[1], mel.shape[2]
 
         ref_token_len = max(1, ref_len)
         gen_token_len = max(1, gen_len)
-        n_prompt, mel_bins = mel.shape
+        
+        # Tính số frame cần sinh dựa trên tốc độ và tỷ lệ token
+        generate_frames = int((n_prompt / ref_token_len) * (1 / speed) * gen_token_len)
+        total_frames = n_prompt + generate_frames
 
-        gen_frames = int((n_prompt / ref_token_len) * (1 / speed) * gen_token_len)
-        total_frames = n_prompt + gen_frames
-
+        # ====================================================
+        # 3. TẠO TENSORS (x0, cond, mask, text_ids)
+        # ====================================================
         x0 = torch.randn((1, total_frames, mel_bins), device=self.device)
+        
         cond = torch.zeros((1, total_frames, mel_bins), device=self.device)
         cond[0, :n_prompt, :] = mel[0]
-
+        
         target_mask = torch.zeros((1, total_frames), device=self.device)
         target_mask[0, n_prompt:] = 1.0
-
+        
+        # Lấy token ID từ tokenizer và chuyển sang Tensor
+        text_ids_raw = self.phoneme_tokenizer.encode(combined_phonemes)
+        
         if isinstance(text_ids_raw, torch.Tensor):
             text_ids = text_ids_raw.clone().detach().to(dtype=torch.long, device=self.device).view(1, -1)
         else:
             text_ids = torch.tensor(text_ids_raw, dtype=torch.long, device=self.device).view(1, -1)
-
-        if text_ids.size(0) < total_frames:
-            text_ids = F.pad(text_ids, (0, total_frames - text_ids.size(1)), value=self.phoneme_tokenizer.pad_id)
-        elif text_ids.size(0) > total_frames:
+            
+        # Padding hoặc Cắt bớt chuỗi token cho khớp với total_frames
+        current_seq_len = text_ids.size(1)
+        if current_seq_len < total_frames:
+            text_ids = F.pad(text_ids, (0, total_frames - current_seq_len), value=self.phoneme_tokenizer.pad_id)
+        elif current_seq_len > total_frames:
             text_ids = text_ids[:, :total_frames]
 
         return {
